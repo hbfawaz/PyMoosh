@@ -1,5 +1,5 @@
 """
-This file contain all functions linked to mode finding and plotting
+This file contain all functions linked to mode finding and plotting.
 """
 import numpy as np
 from PyMoosh.classes import conv_to_nm
