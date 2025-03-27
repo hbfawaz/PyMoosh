@@ -3,10 +3,57 @@ This file contain all functions linked to mode finding and plotting
 """
 import numpy as np
 from PyMoosh.classes import conv_to_nm
+import PyMoosh.non_local as NL
 from PyMoosh.core import cascade
 import copy
 import itertools
 import matplotlib.pyplot as plt
+
+
+def NLdispersion(alpha,struct,wavelength,polarization):
+    """ It would probably be better to compute the dispersion relation of a
+    multilayered structure, like the determinant of the inverse of the
+    scattering matrix. However, strangely enough, for a single interface, it
+    just does not work. Even though the coefficients of the scattering matrix
+    diverge the determinant does not, so that it does not work to find the
+    surface plasmon mode, force instance.
+
+    The present function actually computes the inverse of the modulus of the
+    reflection coefficient. Since a mode is a pole of the coefficient, here it
+    should be a zero of the resulting function. The determination of the square
+    root is modified, so that the modes are not hidden by any cut due to the
+    square root.
+
+    Args:
+        alpha (complex) : wavevector
+        struct (Structure) : the object describing the multilayer
+        wavelength : the wavelength in vacuum in nanometer
+        polarization : 0 for TE, 1 for TM.
+
+    Returns:
+        1/abs(r) : inverse of the modulus of the reflection coefficient.
+
+    """
+
+    if (struct.unit != "nm"):
+        wavelength = conv_to_nm(wavelength, struct.unit)
+    Epsilon_mat, Mu_mat = struct.polarizability(wavelength)
+    thickness = copy.deepcopy(struct.thickness)
+    # In order to ensure that the phase reference is at the beginning
+    # of the first layer. Totally necessary when you are looking for
+    # modes of the structure, this makes the poles of the reflection
+    # coefficient much more visible.
+    thickness[0] = 0
+    Type = struct.layer_type
+    # Wavevector in vacuum.
+    k0 = 2 * np.pi / wavelength
+
+    Epsilon = [Epsilon_mat[i] for i in Type] # to use it in NLcoefficient
+
+
+    r, _, _, _ = NL.NLcoefficient(struct, wavelength, np.arcsin(alpha / (k0 * np.sqrt(Epsilon[0]))), polarization)
+
+    return 1/np.abs(r)
 
 
 def dispersion(alpha,struct,wavelength,polarization):
@@ -165,6 +212,43 @@ def guided_modes(struct,wavelength,polarization,neff_min,neff_max,initial_points
 #        solution = optim.newton(dispersion,kx,args=(struct,wavelength,polarization),tol=tolerance,full_output = True)
 #        solution = optim.minimize(dispersion,kx,args=(struct,wavelength,polarization))
         solution = steepest(neff,tolerance,1000,struct,wavelength,polarization)
+#        print(solution)
+        if (len(modes)==0):
+            modes.append(solution)
+        elif (min(abs(modes-solution))>1e-5*k_0):
+            modes.append(solution)
+
+    return modes
+
+def NLguided_modes(struct,wavelength,polarization,neff_min,neff_max,initial_points = 40):
+
+    """ This function explores the complex plane, looking for zeros of the
+    dispersion relation. It does so by launching a steepest descent for a number
+    `initial_points` of points on the real axis between neff_min and neff_max.
+
+
+    Args:
+        struct (Structure): object describing the multilayer
+        wavelength (float): wavelength in nm
+        polarization: 0 for TE, 1 for TM
+        neff_min: minimum value of the effective index expected
+        neff_max: maximum value of the effective index expected
+
+    Returns:
+        modes (list, complex): complex effective index identified as
+                            solutions of the dispersion relation.
+
+    """
+
+    tolerance = 1e-10
+#    initial_points = 40
+    k_0=2*np.pi/wavelength
+    neff_start = np.linspace(neff_min,neff_max,initial_points,dtype=complex)
+    modes=[]
+    for neff in neff_start:
+#        solution = optim.newton(dispersion,kx,args=(struct,wavelength,polarization),tol=tolerance,full_output = True)
+#        solution = optim.minimize(dispersion,kx,args=(struct,wavelength,polarization))
+        solution = NLsteepest(neff,tolerance,1000,struct,wavelength,polarization)
 #        print(solution)
         if (len(modes)==0):
             modes.append(solution)
@@ -365,6 +449,71 @@ def steepest(start,tol,step_max,struct,wl,pol):
             z_new = z
 
         value_new = dispersion(z_new,struct,wl,pol)
+        if (value_new > current):
+            # The path not taken
+            delta = delta / 2.
+            dz = dz / 2.
+        else:
+            current = value_new
+            z = z_new
+    #        print("Step", step, z,current)
+        step = step + 1
+
+    #print("End of the loop")
+    if step == step_max:
+        print("Warning: maximum number of steps reached")
+
+    return z/k_0
+
+def NLsteepest(start,tol,step_max,struct,wl,pol):
+    """ NL Steepest descent to find a zero of the `dispersion`
+    function. The advantage of looking for a zero is that you
+    know when the algorithm can stop (when the value of the function
+    is smaller than `tol`).
+
+    Args:
+        start (complex): effective index where the descent starts
+        tol (real): when dispersion is smaller than tol, the
+                    descent stops.
+        step_max (integer): maximum number of steps allowed
+        struct (Structure): the object describing the multilayer
+        wl (float): wavelength in vacuum
+        pol: 0 for TE, 1 for TM
+
+    Returns:
+
+        (float) : last effective index reached at the end of the descent
+
+    """
+
+
+    k_0 = 2 * np.pi / wl
+    z = start*k_0
+    delta = abs(z) * 0.001
+    dz= 0.01 * delta
+    step = 0
+    current = NLdispersion(z,struct,wl,pol)
+
+    while (current > tol) and (step < step_max):
+
+        grad = (
+        NLdispersion(z+dz,struct,wl,pol)
+        -current
+#        -dispersion(z-dz,struct,wl,pol)
+        +1j*(NLdispersion(z+1j*dz,struct,wl,pol)
+#        -dispersion(z-1j*dz,struct,wl,pol))
+        -current)
+        )/(dz)
+
+        if abs(grad)!=0 :
+            z_new = z - delta * grad / abs(grad)
+        else:
+            # We have a finishing condition not linked to the gradient
+            # So if we meet a gradient of 0, we just divide the step by two
+            delta = delta/2.
+            z_new = z
+
+        value_new = NLdispersion(z_new,struct,wl,pol)
         if (value_new > current):
             # The path not taken
             delta = delta / 2.
